@@ -40,7 +40,7 @@ def get_pts_tickers():
                     print(f"✅ Données récupérées avec succès via {name}.")
                     break
         except Exception as e:
-            print(f"⚠️️ {name} indisponible : {e}")
+            print(f"⚠️ {name} indisponible : {e}")
 
     if not tickers:
         try:
@@ -101,7 +101,7 @@ def fetch_jp_news(code):
         pass
     return "Pas d'actualité récente."
 
-# 3. Analyse BATCH globale Gemini (avec Retry automatique en cas de 503)
+# 3. Analyse BATCH globale Gemini
 def analyze_all_catalysts(valid_stocks):
     print("\nÉtape 3: Collecte des news JP et Analyse IA Globale...")
     if not client:
@@ -142,12 +142,11 @@ def analyze_all_catalysts(valid_stocks):
     }}
     """
 
-    # Boucle de retry (3 tentatives) pour contourner les erreurs 503
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.8-flash',
                 contents=prompt
             )
             raw_res = response.text.strip()
