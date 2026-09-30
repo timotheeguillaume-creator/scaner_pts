@@ -9,46 +9,58 @@ from google import genai
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# 1. Scraper les Tickers du PTS Kabutan avec entêtes renforcés
+# 1. Scraper les Tickers du PTS Kabutan via le proxy Google (contournement du géo-blocage)
 def get_pts_tickers():
     print("Étape 1: Récupération des Top Gainers PTS...")
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
-        'Referer': 'https://kabutan.jp/'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     }
-    url = "https://kabutan.jp/pts/"
     
+    # URL passant par le proxy Google Translate pour contourner le géo-blocage de Kabutan
+    url_proxy = "https://kabutan-jp.translate.goog/pts/?_x_tr_sl=ja&_x_tr_tl=en"
+    url_direct = "https://kabutan.jp/pts/"
+    
+    response = None
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        print(f"Statut HTTP Kabutan : {response.status_code}")
+        # Essai via le proxy Google
+        response = requests.get(url_proxy, headers=headers, timeout=15)
+        print(f"Statut HTTP (Proxy Google) : {response.status_code}")
         
+        # Secours via l'URL directe si le proxy échoue
         if response.status_code != 200:
-            print("Erreur d'accès à Kabutan (code HTTP non-200).")
-            return []
+            print("Tentative via accès direct...")
+            response = requests.get(url_direct, headers=headers, timeout=15)
+            print(f"Statut HTTP (Direct) : {response.status_code}")
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        tickers = []
-        
-        # Extraction des codes tickers à 4 chiffres dans les liens
-        for a in soup.find_all('a', href=re.compile(r'/stock/\?code=\d{4}')):
-            code = a.text.strip()
-            if code.isdigit() and len(code) == 4 and code not in tickers:
+    except Exception as e:
+        print(f"Erreur de connexion : {e}")
+        return []
+
+    if not response or response.status_code != 200:
+        print("Erreur d'accès à la page des données PTS.")
+        return []
+
+    soup = BeautifulSoup(response.text, 'html.parser')
+    tickers = []
+    
+    # Recherche des codes tickers à 4 chiffres dans les liens
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        match = re.search(r'code=(\d{4})', href) or re.search(r'/stock/.*code=(\d{4})', href)
+        if match:
+            code = match.group(1)
+            if code not in tickers:
                 tickers.append(code)
 
-        # Fallback par Regex sur tout le code HTML si le sélecteur échoue
-        if not tickers:
-            matches = re.findall(r'/stock/\?code=(\d{4})', response.text)
-            for code in matches:
-                if code not in tickers:
-                    tickers.append(code)
+    # Fallback par Regex sur tout le corps du texte HTML
+    if not tickers:
+        matches = re.findall(r'code=(\d{4})', response.text)
+        for code in matches:
+            if code not in tickers:
+                tickers.append(code)
 
-        print(f"{len(tickers)} tickers trouvés sur le PTS.")
-        return tickers[:30]
-    except Exception as e:
-        print(f"Erreur lors du scraping : {e}")
-        return []
+    print(f"{len(tickers)} tickers trouvés sur le PTS.")
+    return tickers[:30]
 
 # 2. Filtrer selon tes critères stricts (Yahoo Finance)
 def filter_tickers(tickers):
@@ -64,7 +76,8 @@ def filter_tickers(tickers):
             mkt_cap = info.get('marketCap', 0)
             avg_vol = info.get('averageVolume10days', 0)
             
-            # Filtres : Prix 150-2300 JPY, Mkt Cap <= 100B JPY, Vol 10j >= 100k
+            # Application de tes filtres stricts :
+            # Prix : 150 à 2300 JPY | Market Cap <= 100 Billion JPY | Vol 10j >= 100k
             if (150 <= price <= 2300) and \
                (mkt_cap <= 100_000_000_000) and \
                (avg_vol >= 100_000):
