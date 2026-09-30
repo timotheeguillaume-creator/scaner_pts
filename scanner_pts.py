@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import requests
 import yfinance as yf
 from google import genai
@@ -19,7 +20,6 @@ def get_pts_tickers():
 
     tickers = []
     
-    # Tentative via Minkabu
     try:
         res = requests.get(url_minkabu, headers=headers, timeout=15)
         if res.status_code == 200 and "Human Verification" not in res.text:
@@ -31,7 +31,6 @@ def get_pts_tickers():
     except Exception as e:
         print(f"Échec Minkabu : {e}")
 
-    # Fallback via Yahoo Finance JP
     if not tickers:
         try:
             print("Tentative de secours via Yahoo Finance JP...")
@@ -78,7 +77,7 @@ def filter_tickers(tickers):
     print(f"📊 {len(valid_stocks)} / {len(tickers)} actions correspondent à tes critères.")
     return valid_stocks
 
-# 3. Analyser le catalyseur avec Gemini API
+# 3. Analyser le catalyseur avec Gemini API (avec retry et pause rate-limit)
 def analyze_catalyst(valid_stocks):
     print("\nÉtape 3: Analyse IA des catalyseurs...")
     if not client:
@@ -106,16 +105,25 @@ def analyze_catalyst(valid_stocks):
         Catalyseur: [Type] | Score: [X]/10 | Résumé: [Ta phrase]
         """
         
-        try:
-            response = client.models.generate_content(
-                model='gemini-3.8-flash',
-                contents=prompt
-            )
-            print(f"\n🚀 ACTION SÉLECTIONNÉE : {code} ({stock['price']} ¥)")
-            print(f"Mkt Cap: {stock['mkt_cap']/1_000_000_000:.2f} B¥ | Vol 10j: {stock['avg_vol']}")
-            print(response.text.strip())
-        except Exception as e:
-            print(f"[{code}] - Erreur Gemini : {e}")
+        # Gestion des essais et de la limite de 5 req/min
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model='gemini-3.8-flash',
+                    contents=prompt
+                )
+                print(f"\n🚀 ACTION SÉLECTIONNÉE : {code} ({stock['price']} ¥)")
+                print(f"Mkt Cap: {stock['mkt_cap']/1_000_000_000:.2f} B¥ | Vol 10j: {stock['avg_vol']}")
+                print(response.text.strip())
+                time.sleep(12)  # Pause de 12s pour ne pas dépasser les 5 requêtes/min
+                break
+            except Exception as e:
+                if "429" in str(e) or "503" in str(e):
+                    print(f"[{code}] Quota ou charge élevée (tentative {attempt+1}/3), pause de 15s...")
+                    time.sleep(15)
+                else:
+                    print(f"[{code}] - Erreur Gemini : {e}")
+                    break
 
 if __name__ == "__main__":
     if not GEMINI_API_KEY:
