@@ -8,44 +8,50 @@ from google import genai
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
-}
+HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
-# 1. Scraper les Tickers PTS directement (Sans proxy externe)
+# 1. Scraper les Tickers PTS avec Multi-sources & Failover
 def get_pts_tickers():
     print("Étape 1: Récupération des Top Gainers PTS...")
-    tickers = []
     
-    # Minkabu PTS Direct
-    try:
-        url_minkabu = "https://minkabu.jp/ranking/pts/gainers"
-        res = requests.get(url_minkabu, headers=HEADERS, timeout=10)
-        if res.status_code == 200:
-            found = re.findall(r'/stock/(\d{4})', res.text)
-            for code in found:
-                if code not in {'2024', '2025', '2026', '2027'} and code not in tickers:
-                    tickers.append(code)
-            if tickers:
-                print("✅ Données récupérées directement depuis Minkabu PTS.")
-    except Exception as e:
-        print(f"⚠️ Échec Minkabu direct : {e}")
+    # Liste des sources ordonnées par priorité
+    sources = [
+        ("Minkabu Jina", "https://r.jina.ai/https://minkabu.jp/ranking/pts/gainers"),
+        ("Kabutan Jina", "https://r.jina.ai/https://kabutan.jp/pts/"),
+        ("Yahoo JP Jina", "https://r.jina.ai/https://finance.yahoo.co.jp/data/ranking/pts-price-increase")
+    ]
+    
+    tickers = []
 
-    # Fallback Yahoo Finance JP PTS Direct
+    for name, url in sources:
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=25)
+            if res.status_code == 200:
+                # Recherche des codes boursiers à 4 chiffres
+                found = re.findall(r'\b([1-9]\d{3})\b', res.text)
+                for code in found:
+                    if code not in {'2024', '2025', '2026', '2027', '2028', '1000', '2000'} and code not in tickers:
+                        tickers.append(code)
+                
+                if len(tickers) >= 5:
+                    print(f"✅ Données récupérées avec succès via {name}.")
+                    break
+        except Exception as e:
+            print(f"⚠️ {name} indisponible : {e}")
+
+    # Fallback Kabutan direct si Jina ne répond pas
     if not tickers:
         try:
-            url_yahoo = "https://finance.yahoo.co.jp/data/ranking/pts-price-increase"
-            res = requests.get(url_yahoo, headers=HEADERS, timeout=10)
-            if res.status_code == 200:
-                found = re.findall(r'quote/(\d{4})', res.text) or re.findall(r'\b([1-9]\d{3})\b', res.text)
-                for code in found:
-                    if code not in {'2024', '2025', '2026', '2027'} and code not in tickers:
-                        tickers.append(code)
-                if tickers:
-                    print("✅ Données récupérées depuis Yahoo Finance JP PTS.")
+            print("Tentative de secours Kabutan direct...")
+            res = requests.get("https://kabutan.jp/pts/", headers=HEADERS, timeout=10)
+            found = re.findall(r'code=(\d{4})', res.text) or re.findall(r'/stock/(\d{4})', res.text)
+            for code in found:
+                if code not in tickers:
+                    tickers.append(code)
+            if tickers:
+                print("✅ Données récupérées via Kabutan direct.")
         except Exception as e:
-            print(f"⚠️ Échec Yahoo JP direct : {e}")
+            print(f"⚠️ Échec secours Kabutan : {e}")
 
     print(f"✅ {len(tickers)} tickers bruts extraits du PTS.")
     return tickers[:30]
@@ -58,16 +64,15 @@ def filter_tickers(tickers):
     for code in tickers:
         try:
             ticker_yf = yf.Ticker(f"{code}.T")
-            fast_info = ticker_yf.fast_info
+            info = ticker_yf.info
             
-            price = fast_info.last_price or 0
-            mkt_cap = fast_info.market_cap or 0
+            price = info.get('regularMarketPrice') or info.get('currentPrice') or getattr(ticker_yf.fast_info, 'last_price', 0)
+            mkt_cap = info.get('marketCap') or getattr(ticker_yf.fast_info, 'market_cap', 0)
+            avg_vol = info.get('averageVolume10days', 0) or info.get('volume', 0)
             
-            try:
-                avg_vol = ticker_yf.info.get('averageVolume10days', 0)
-            except Exception:
-                avg_vol = 100_000  # Sécurité pour ne pas bloquer si info échoue
-            
+            if not price or not mkt_cap:
+                continue
+
             # Filtres : Prix 150-2300 JPY | Mkt Cap <= 100B JPY | Vol 10j >= 100k
             if (150 <= price <= 2300) and (mkt_cap <= 100_000_000_000) and (avg_vol >= 100_000):
                 valid_stocks.append({
@@ -82,24 +87,22 @@ def filter_tickers(tickers):
     print(f"📊 {len(valid_stocks)} / {len(tickers)} actions correspondent à tes critères.")
     return valid_stocks
 
-# Extraction directe des actualités en HTML nettoyé
+# Récupérer les actualités en japonais
 def fetch_jp_news(code):
     try:
-        url = f"https://minkabu.jp/stock/{code}/news"
+        url = f"https://r.jina.ai/https://minkabu.jp/stock/{code}/news"
         res = requests.get(url, headers=HEADERS, timeout=8)
         if res.status_code == 200:
-            text = re.sub(r'<script.*?>.*?</script>', '', res.text, flags=re.DOTALL)
-            text = re.sub(r'<style.*?>.*?</style>', '', text, flags=re.DOTALL)
-            clean_lines = [re.sub(r'<.*?>', '', line).strip() for line in text.split('\n')]
-            clean_text = " | ".join([line for line in clean_lines if len(line) > 20])
+            lines = [line.strip() for line in res.text.split('\n') if len(line.strip()) > 15]
+            clean_text = " | ".join(lines[3:20])
             return clean_text[:1200] if clean_text else "Pas d'actualité récente disponible."
     except Exception:
         pass
-    return "Pas d'actualité disponible."
+    return "Pas d'actualité récente."
 
-# 3. Analyse BATCH globale Gemini (1 seul appel rapide)
+# 3. Analyse BATCH globale Gemini (1 seul appel API rapide)
 def analyze_all_catalysts(valid_stocks):
-    print("\nÉtape 3: Analyse IA Globale des catalyseurs (1 seul appel Gemini)...")
+    print("\nÉtape 3: Collecte des news JP et Analyse IA Globale...")
     if not client:
         print("Erreur: Clé API Gemini non disponible.")
         return
@@ -118,12 +121,12 @@ def analyze_all_catalysts(valid_stocks):
 
     prompt = f"""
     Tu es un analyste financier expert du marché japonais (Tokyo Stock Exchange / PTS).
-    Voici la liste des actions ayant un fort volume/hausse en PTS avec leurs actualités/communiqués :
+    Voici la liste des actions PTS avec leurs actualités récentes :
 
     {json.dumps(payload, ensure_ascii=False, indent=2)}
 
     Pour CHAQUE action :
-    1. Détecte si la news contient une vraie annonce d'entreprise (Résultats, Révision à la hausse, Rachat d'actions, Partenariat, M&A).
+    1. Détecte si la news contient une vraie annonce d'entreprise (Résultats, Révision à la hausse, Rachat d'actions, Partenariat, M&A, TDNet).
     2. Sinon, indique "Spéculation PTS / Flux technique".
     3. Assigne un score d'impact de 1 à 10 pour un trade intraday.
     4. Rédige un résumé synthétique d'une phrase en français.
