@@ -1,20 +1,24 @@
 import os
 import re
 import json
+import time
+import logging
 import requests
 import yfinance as yf
 from google import genai
+
+# Masquer les warnings / logs d'erreur parasites de yfinance
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
-# 1. Scraper les Tickers PTS avec Multi-sources & Failover
+# 1. Scraper les Tickers PTS avec Multi-sources
 def get_pts_tickers():
     print("Étape 1: Récupération des Top Gainers PTS...")
     
-    # Liste des sources ordonnées par priorité
     sources = [
         ("Minkabu Jina", "https://r.jina.ai/https://minkabu.jp/ranking/pts/gainers"),
         ("Kabutan Jina", "https://r.jina.ai/https://kabutan.jp/pts/"),
@@ -27,7 +31,6 @@ def get_pts_tickers():
         try:
             res = requests.get(url, headers=HEADERS, timeout=25)
             if res.status_code == 200:
-                # Recherche des codes boursiers à 4 chiffres
                 found = re.findall(r'\b([1-9]\d{3})\b', res.text)
                 for code in found:
                     if code not in {'2024', '2025', '2026', '2027', '2028', '1000', '2000'} and code not in tickers:
@@ -37,12 +40,10 @@ def get_pts_tickers():
                     print(f"✅ Données récupérées avec succès via {name}.")
                     break
         except Exception as e:
-            print(f"⚠️ {name} indisponible : {e}")
+            print(f"⚠️️ {name} indisponible : {e}")
 
-    # Fallback Kabutan direct si Jina ne répond pas
     if not tickers:
         try:
-            print("Tentative de secours Kabutan direct...")
             res = requests.get("https://kabutan.jp/pts/", headers=HEADERS, timeout=10)
             found = re.findall(r'code=(\d{4})', res.text) or re.findall(r'/stock/(\d{4})', res.text)
             for code in found:
@@ -56,7 +57,7 @@ def get_pts_tickers():
     print(f"✅ {len(tickers)} tickers bruts extraits du PTS.")
     return tickers[:30]
 
-# 2. Filtrer selon tes critères stricts (Prix, Mkt Cap, Volume)
+# 2. Filtrer selon les critères (Prix, Mkt Cap, Volume)
 def filter_tickers(tickers):
     print("\nÉtape 2: Application des filtres (Prix, Mkt Cap, Volume)...")
     valid_stocks = []
@@ -100,7 +101,7 @@ def fetch_jp_news(code):
         pass
     return "Pas d'actualité récente."
 
-# 3. Analyse BATCH globale Gemini (1 seul appel API rapide)
+# 3. Analyse BATCH globale Gemini (avec Retry automatique en cas de 503)
 def analyze_all_catalysts(valid_stocks):
     print("\nÉtape 3: Collecte des news JP et Analyse IA Globale...")
     if not client:
@@ -141,35 +142,46 @@ def analyze_all_catalysts(valid_stocks):
     }}
     """
 
-    try:
-        response = client.models.generate_content(
-            model='gemini-3.8-flash',
-            contents=prompt
-        )
-        raw_res = response.text.strip()
-        json_match = re.search(r'\{.*\}', raw_res, re.DOTALL)
-        
-        if json_match:
-            results = json.loads(json_match.group(0))
-            print("\n" + "="*50)
-            print("⚡ RÉSULTATS DU SCANNER PTS")
-            print("="*50)
+    # Boucle de retry (3 tentatives) pour contourner les erreurs 503
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt
+            )
+            raw_res = response.text.strip()
+            json_match = re.search(r'\{.*\}', raw_res, re.DOTALL)
             
-            for stock in valid_stocks:
-                code = stock['code']
-                res = results.get(code, {})
-                cat = res.get('catalyseur', 'Spéculation PTS')
-                score = res.get('score', 1)
-                resume = res.get('resume', 'Aucune annonce majeure identifiée.')
+            if json_match:
+                results = json.loads(json_match.group(0))
+                print("\n" + "="*50)
+                print("⚡ RÉSULTATS DU SCANNER PTS")
+                print("="*50)
                 
-                print(f"\n🚀 ACTION SÉLECTIONNÉE : {code} ({stock['price']} ¥)")
-                print(f"Mkt Cap: {stock['mkt_cap']/1_000_000_000:.2f} B¥ | Vol 10j: {stock['avg_vol']}")
-                print(f"Catalyseur: {cat} | Score: {score}/10 | Résumé: {resume}")
-        else:
-            print("⚠️ Réponse IA non formatée en JSON.")
+                for stock in valid_stocks:
+                    code = stock['code']
+                    res = results.get(code, {})
+                    cat = res.get('catalyseur', 'Spéculation PTS')
+                    score = res.get('score', 1)
+                    resume = res.get('resume', 'Aucune annonce majeure identifiée.')
+                    
+                    print(f"\n🚀 ACTION SÉLECTIONNÉE : {code} ({stock['price']} ¥)")
+                    print(f"Mkt Cap: {stock['mkt_cap']/1_000_000_000:.2f} B¥ | Vol 10j: {stock['avg_vol']}")
+                    print(f"Catalyseur: {cat} | Score: {score}/10 | Résumé: {resume}")
+                break
+            else:
+                print("⚠️ Réponse IA non formatée en JSON.")
+                break
 
-    except Exception as e:
-        print(f"❌ Erreur API Gemini : {e}")
+        except Exception as e:
+            print(f"⚠️ Erreur API Gemini (tentative {attempt}/{max_retries}) : {e}")
+            if attempt < max_retries:
+                sleep_time = attempt * 3
+                print(f"⏳ Attente de {sleep_time}s avant réessai...")
+                time.sleep(sleep_time)
+            else:
+                print("❌ Impossible de contacter Gemini après plusieurs essais.")
 
 if __name__ == "__main__":
     if not GEMINI_API_KEY:
