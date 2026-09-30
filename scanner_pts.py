@@ -4,11 +4,10 @@ import requests
 import yfinance as yf
 from google import genai
 
-# Configuration de l'API Gemini avec le SDK officiel google-genai
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# 1. Scraper les Tickers du PTS Kabutan via Jina AI Reader
+# 1. Scraper les Tickers PTS avec logs de débogage
 def get_pts_tickers():
     print("Étape 1: Récupération des Top Gainers PTS...")
     headers = {
@@ -19,20 +18,25 @@ def get_pts_tickers():
     
     try:
         response = requests.get(url_jina, headers=headers, timeout=20)
-        print(f"Statut HTTP (via Jina Reader) : {response.status_code}")
+        print(f"Statut HTTP : {response.status_code}")
         
         if response.status_code != 200:
-            print("Erreur d'accès à la page des données PTS.")
+            print("❌ Erreur d'accès à la page PTS.")
             return []
 
         raw_text = response.text
-        
-        # Extraction ciblée des codes tickers à 4 chiffres dans les liens Markdown
-        found_codes = re.findall(r'code=(\d{4})', raw_text) + re.findall(r'/stock/\?code=(\d{4})', raw_text)
-        
-        # Fallback par Regex élargie si aucun paramètre URL n'est trouvé
+        print(f"🔍 Débogage : {len(raw_text)} caractères récupérés.")
+        print("--- Début de la page reçue par Jina ---")
+        print(raw_text[:400])  # Affiche les 400 premiers caractères dans la console GitHub
+        print("---------------------------------------")
+
+        # Recherche des codes à 4 chiffres (ex: 7203, 9984) dans les tableaux/liens Markdown
+        found_codes = re.findall(r'code=(\d{4})', raw_text)
         if not found_codes:
-            found_codes = re.findall(r'\b([1-9]\d{3})\b', raw_text)
+            # Capture les codes situés dans des cellules de tableau Markdown | 1234 | ou liens [1234]
+            found_codes = re.findall(r'\[(\d{4})\]|\|\s*(\d{4})\s*\|', raw_text)
+            # Aplatir le tuple renvoyé par le regex multi-groupes
+            found_codes = [code for group in found_codes for code in group if code]
 
         tickers = []
         excluded_numbers = {'2024', '2025', '2026', '2027'}
@@ -40,16 +44,16 @@ def get_pts_tickers():
             if code not in excluded_numbers and code not in tickers:
                 tickers.append(code)
 
-        print(f"{len(tickers)} tickers extraits du PTS.")
+        print(f"✅ {len(tickers)} tickers bruts extraits de Kabutan.")
         return tickers[:30]
 
     except Exception as e:
-        print(f"Erreur de connexion : {e}")
+        print(f"❌ Erreur lors du scraping : {e}")
         return []
 
-# 2. Filtrer selon tes critères stricts (Yahoo Finance)
+# 2. Filtrer selon tes critères stricts
 def filter_tickers(tickers):
-    print("Étape 2: Filtrage selon tes critères (Prix, Mkt Cap, Volume)...")
+    print("\nÉtape 2: Application de tes filtres (Prix, Mkt Cap, Volume)...")
     valid_stocks = []
     
     for code in tickers:
@@ -61,7 +65,7 @@ def filter_tickers(tickers):
             mkt_cap = info.get('marketCap', 0)
             avg_vol = info.get('averageVolume10days', 0)
             
-            # Filtres : Prix 150-2300 JPY, Market Cap <= 100B JPY, Vol 10j >= 100k
+            # Filtres stricts : Prix 150-2300 JPY, Market Cap <= 100B JPY, Vol 10j >= 100k
             if (150 <= price <= 2300) and \
                (mkt_cap <= 100_000_000_000) and \
                (avg_vol >= 100_000):
@@ -75,14 +79,14 @@ def filter_tickers(tickers):
         except Exception:
             continue
             
-    print(f"{len(valid_stocks)} actions correspondent à tes critères.")
+    print(f"📊 {len(valid_stocks)} / {len(tickers)} actions passent tes critères.")
     return valid_stocks
 
 # 3. Analyser le catalyseur avec Gemini API
 def analyze_catalyst(valid_stocks):
-    print("Étape 3: Recherche de news et analyse IA...")
+    print("\nÉtape 3: Analyse IA des catalyseurs...")
     if not client:
-        print("Erreur: Clé API Gemini non initialisée.")
+        print("Erreur: Clé API Gemini non disponible.")
         return
 
     for stock in valid_stocks:
@@ -94,14 +98,11 @@ def analyze_catalyst(valid_stocks):
         except Exception:
             news_list = []
         
-        if not news_list:
-            news_text = "Pas de titre de news récent disponible."
-        else:
-            news_text = " | ".join([n.get('title', '') for n in news_list[:3]])
+        news_text = " | ".join([n.get('title', '') for n in news_list[:3]]) if news_list else "Pas de news récente."
         
         prompt = f"""
         Tu es un analyste financier expert du marché japonais.
-        Voici les dernières actualités pour le titre {code} de la bourse de Tokyo : "{news_text}".
+        Voici les dernières actualités pour le titre {code} (Tokyo) : "{news_text}".
         1. Identifie la raison de la hausse (résultats, rachat, contrat, etc.).
         2. Donne-lui un score d'impact de 1 à 10.
         3. Fais un résumé d'une seule phrase en français.
@@ -114,16 +115,15 @@ def analyze_catalyst(valid_stocks):
                 model='gemini-2.5-flash',
                 contents=prompt
             )
-            print(f"\n✅ ACTION RETENUE : {code} (Prix: {stock['price']} ¥)")
+            print(f"\n🚀 ACTION SELECTIONNÉE : {code} ({stock['price']} ¥)")
             print(f"Mkt Cap: {stock['mkt_cap']/1_000_000_000:.2f} B¥ | Vol 10j: {stock['avg_vol']}")
             print(response.text.strip())
         except Exception as e:
-            print(f"\n[{code}] - Erreur API Gemini : {e}")
+            print(f"[{code}] - Erreur Gemini : {e}")
 
-# Exécution principale
 if __name__ == "__main__":
     if not GEMINI_API_KEY:
-        print("Erreur: Clé API Gemini manquante.")
+        print("Erreur: Clé API Gemini manquante dans GitHub Secrets.")
         exit(1)
         
     tickers = get_pts_tickers()
@@ -132,6 +132,6 @@ if __name__ == "__main__":
         if filtered:
             analyze_catalyst(filtered)
         else:
-            print("Aucune action ne passe les filtres aujourd'hui.")
+            print("ℹ️ Résultat vide légitime : des tickers ont été trouvés sur le PTS, mais aucun ne correspond à tes filtres (prix/capitalisation/volume).")
     else:
-        print("Aucun ticker récupéré lors de l'étape 1.")
+        print("⚠️ Problème à l'étape 1 : Aucun ticker n'a été extrait du HTML de Kabutan.")
