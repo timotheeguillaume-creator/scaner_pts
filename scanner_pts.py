@@ -13,33 +13,31 @@ client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 def get_pts_tickers():
     print("Étape 1: Récupération des Top Gainers PTS...")
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept-Language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
         'Referer': 'https://kabutan.jp/'
     }
     url = "https://kabutan.jp/pts/"
     
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         print(f"Statut HTTP Kabutan : {response.status_code}")
         
         if response.status_code != 200:
-            print("Impossible d'accéder à Kabutan (blocage d'accès).")
+            print("Erreur d'accès à Kabutan (code HTTP non-200).")
             return []
 
         soup = BeautifulSoup(response.text, 'html.parser')
         tickers = []
         
-        # Recherche robuste des codes à 4 chiffres dans les liens
-        for a in soup.find_all('a', href=re.compile(r'/stock/.*code=\d{4}')):
-            text = a.text.strip()
-            match = re.search(r'\b\d{4}\b', text) or re.search(r'code=(\d{4})', a.get('href', ''))
-            if match:
-                code = match.group(1) if 'code=' in match.group(0) else match.group(0)
-                if code.isdigit() and code not in tickers:
-                    tickers.append(code)
+        # Extraction des codes tickers à 4 chiffres dans les liens
+        for a in soup.find_all('a', href=re.compile(r'/stock/\?code=\d{4}')):
+            code = a.text.strip()
+            if code.isdigit() and len(code) == 4 and code not in tickers:
+                tickers.append(code)
 
-        # Fallback par Regex brute si le sélecteur HTML échoue
+        # Fallback par Regex sur tout le code HTML si le sélecteur échoue
         if not tickers:
             matches = re.findall(r'/stock/\?code=(\d{4})', response.text)
             for code in matches:
@@ -49,7 +47,7 @@ def get_pts_tickers():
         print(f"{len(tickers)} tickers trouvés sur le PTS.")
         return tickers[:30]
     except Exception as e:
-        print(f"Erreur de scraping : {e}")
+        print(f"Erreur lors du scraping : {e}")
         return []
 
 # 2. Filtrer selon tes critères stricts (Yahoo Finance)
@@ -66,6 +64,7 @@ def filter_tickers(tickers):
             mkt_cap = info.get('marketCap', 0)
             avg_vol = info.get('averageVolume10days', 0)
             
+            # Filtres : Prix 150-2300 JPY, Mkt Cap <= 100B JPY, Vol 10j >= 100k
             if (150 <= price <= 2300) and \
                (mkt_cap <= 100_000_000_000) and \
                (avg_vol >= 100_000):
@@ -85,9 +84,8 @@ def filter_tickers(tickers):
 # 3. Analyser le catalyseur avec Gemini API
 def analyze_catalyst(valid_stocks):
     print("Étape 3: Recherche de news et analyse IA...")
-    
     if not client:
-        print("Erreur: Client Gemini non initialisé.")
+        print("Erreur: Clé API Gemini non initialisée.")
         return
 
     for stock in valid_stocks:
