@@ -17,8 +17,8 @@ def get_pts_tickers():
     tickers = []
     
     try:
-        res = requests.get(url_minkabu, headers=HEADERS, timeout=15)
-        if res.status_code == 200 and "Human Verification" not in res.text:
+        res = requests.get(url_minkabu, headers=HEADERS, timeout=20)
+        if res.status_code == 200:
             print("✅ Données récupérées depuis Minkabu PTS.")
             found = re.findall(r'/stock/(\d{4})', res.text) or re.findall(r'\b([1-9]\d{3})\b', res.text)
             for code in found:
@@ -61,24 +61,24 @@ def filter_tickers(tickers):
     print(f"📊 {len(valid_stocks)} / {len(tickers)} actions correspondent à tes critères.")
     return valid_stocks
 
-# Récupérer les vraies actualités en japonais depuis Yahoo Finance JP
+# Récupérer les vraies actualités en japonais depuis Minkabu News
 def fetch_jp_news(code):
     try:
-        url = f"https://r.jina.ai/https://finance.yahoo.co.jp/quote/{code}.T/news"
-        res = requests.get(url, headers=HEADERS, timeout=10)
+        url = f"https://r.jina.ai/https://minkabu.jp/stock/{code}/news"
+        res = requests.get(url, headers=HEADERS, timeout=15)
         if res.status_code == 200:
-            # Extraire les premières lignes contenant du texte de news
-            lines = [line.strip() for line in res.text.split('\n') if len(line.strip()) > 15]
-            # Conserver les 10 premières lignes significatives
-            clean_text = " | ".join(lines[:10])
-            return clean_text[:1000]
+            # Filtrer les lignes vides ou trop courtes (souvent le menu de navigation)
+            lines = [line.strip() for line in res.text.split('\n') if len(line.strip()) > 20]
+            # On ignore les 5 premières lignes et on garde les 15 suivantes (cœur de l'article)
+            clean_text = " | ".join(lines[5:20])
+            return clean_text[:1500]
     except Exception:
         pass
-    return "Pas d'actualité récente disponible sur Yahoo JP."
+    return "Pas d'actualité récente disponible."
 
 # 3. Analyser le catalyseur avec Gemini API
 def analyze_catalyst(valid_stocks):
-    print("\nÉtape 3: Analyse IA des catalyseurs (News JP en direct)...")
+    print("\nÉtape 3: Analyse IA des catalyseurs (News Minkabu en direct)...")
     if not client:
         print("Erreur: Clé API Gemini non disponible.")
         return
@@ -89,20 +89,21 @@ def analyze_catalyst(valid_stocks):
         
         prompt = f"""
         Tu es un analyste financier expert du marché japonais (Tokyo Stock Exchange).
-        Voici le contenu récent extrait des actualités/annonces pour l'action {code} :
+        Voici le contenu récent extrait des actualités pour l'action {code} :
         "{news_jp}"
 
         Tâche :
-        1. Analyse le contenu pour détecter une vraie annonce d'entreprise (Résultats financiers, Révision à la hausse, Rachat d'actions, Partenariat/M&A, Nouveau produit, etc.).
-        2. Si aucune annonce claire n'est visible, indique si le mouvement semble être une pure spéculation technique / momentum PTS.
-        3. Assigne un score d'impact réel de 1 à 10 pour un trade Short-Term intraday.
+        1. Analyse le contenu pour détecter une vraie annonce d'entreprise (Résultats financiers, Révision, Rachat d'actions, Partenariat, Nouveau produit).
+        2. Si aucune annonce claire n'est visible, indique si le mouvement est spéculatif.
+        3. Assigne un score d'impact réel de 1 à 10 pour un trade intraday.
         4. Fais un résumé synthétique d'une phrase en français.
 
         Réponds STRICTEMENT sous ce format :
-        Catalyseur: [Type exact d'annonce ou Spéculation PTS] | Score: [X]/10 | Résumé: [Explication synthétique]
+        Catalyseur: [Type] | Score: [X]/10 | Résumé: [Phrase synthétique]
         """
         
-        for attempt in range(3):
+        # 4 tentatives avec un long temps d'arrêt pour éviter les 429 Resource Exhausted
+        for attempt in range(4):
             try:
                 response = client.models.generate_content(
                     model='gemini-3.8-flash',
@@ -111,14 +112,16 @@ def analyze_catalyst(valid_stocks):
                 print(f"\n🚀 ACTION SÉLECTIONNÉE : {code} ({stock['price']} ¥)")
                 print(f"Mkt Cap: {stock['mkt_cap']/1_000_000_000:.2f} B¥ | Vol 10j: {stock['avg_vol']}")
                 print(response.text.strip())
-                time.sleep(14)  # Pause de 14s (évite 100% du 429 quota)
+                
+                # PAUSE DE SÉCURITÉ ABSOLUE : 25 SECONDES
+                time.sleep(25) 
                 break
             except Exception as e:
-                if "429" in str(e) or "503" in str(e):
-                    print(f"[{code}] Quota/charge élevée, nouvelle tentative dans 15s...")
-                    time.sleep(15)
+                if "429" in str(e) or "503" in str(e) or "quota" in str(e).lower():
+                    print(f"[{code}] Quota ou charge serveur (Essai {attempt+1}/4), pause de 30s...")
+                    time.sleep(30)
                 else:
-                    print(f"[{code}] Erreur Gemini : {e}")
+                    print(f"[{code}] Erreur API Gemini : {e}")
                     break
 
 if __name__ == "__main__":
