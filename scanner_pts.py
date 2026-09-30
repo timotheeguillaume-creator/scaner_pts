@@ -101,7 +101,7 @@ def fetch_jp_news(code):
         pass
     return "Pas d'actualité récente."
 
-# 3. Analyse BATCH globale Gemini
+# 3. Analyse BATCH globale Gemini (avec Exponential Backoff)
 def analyze_all_catalysts(valid_stocks):
     print("\nÉtape 3: Collecte des news JP et Analyse IA Globale...")
     if not client:
@@ -142,7 +142,9 @@ def analyze_all_catalysts(valid_stocks):
     }}
     """
 
-    max_retries = 3
+    max_retries = 5
+    base_delay = 5
+
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
@@ -176,7 +178,7 @@ def analyze_all_catalysts(valid_stocks):
         except Exception as e:
             print(f"⚠️ Erreur API Gemini (tentative {attempt}/{max_retries}) : {e}")
             if attempt < max_retries:
-                sleep_time = attempt * 3
+                sleep_time = base_delay * (2 ** (attempt - 1))
                 print(f"⏳ Attente de {sleep_time}s avant réessai...")
                 time.sleep(sleep_time)
             else:
