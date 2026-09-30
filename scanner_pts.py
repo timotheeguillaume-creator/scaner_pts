@@ -7,51 +7,49 @@ from google import genai
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# 1. Scraper les Tickers PTS avec logs de débogage
+# 1. Scraper les Tickers PTS depuis Minkabu / Yahoo JP (sources de secours anti-blocage)
 def get_pts_tickers():
     print("Étape 1: Récupération des Top Gainers PTS...")
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     
-    url_jina = "https://r.jina.ai/https://kabutan.jp/pts/"
+    # Source 1: Minkabu PTS Gainers (Très fiable)
+    url_minkabu = "https://r.jina.ai/https://minkabu.jp/ranking/pts/gainers"
+    # Source 2: Yahoo Finance JP PTS Ranking
+    url_yahoo_jp = "https://r.jina.ai/https://finance.yahoo.co.jp/data/ranking/pts-price-increase"
+
+    tickers = []
     
+    # Tentative via Minkabu
     try:
-        response = requests.get(url_jina, headers=headers, timeout=20)
-        print(f"Statut HTTP : {response.status_code}")
-        
-        if response.status_code != 200:
-            print("❌ Erreur d'accès à la page PTS.")
-            return []
-
-        raw_text = response.text
-        print(f"🔍 Débogage : {len(raw_text)} caractères récupérés.")
-        print("--- Début de la page reçue par Jina ---")
-        print(raw_text[:400])  # Affiche les 400 premiers caractères dans la console GitHub
-        print("---------------------------------------")
-
-        # Recherche des codes à 4 chiffres (ex: 7203, 9984) dans les tableaux/liens Markdown
-        found_codes = re.findall(r'code=(\d{4})', raw_text)
-        if not found_codes:
-            # Capture les codes situés dans des cellules de tableau Markdown | 1234 | ou liens [1234]
-            found_codes = re.findall(r'\[(\d{4})\]|\|\s*(\d{4})\s*\|', raw_text)
-            # Aplatir le tuple renvoyé par le regex multi-groupes
-            found_codes = [code for group in found_codes for code in group if code]
-
-        tickers = []
-        excluded_numbers = {'2024', '2025', '2026', '2027'}
-        for code in found_codes:
-            if code not in excluded_numbers and code not in tickers:
-                tickers.append(code)
-
-        print(f"✅ {len(tickers)} tickers bruts extraits de Kabutan.")
-        return tickers[:30]
-
+        res = requests.get(url_minkabu, headers=headers, timeout=15)
+        if res.status_code == 200 and "Human Verification" not in res.text:
+            print("✅ Données récupérées depuis Minkabu PTS.")
+            found = re.findall(r'/stock/(\d{4})', res.text) or re.findall(r'\b([1-9]\d{3})\b', res.text)
+            for code in found:
+                if code not in {'2024', '2025', '2026', '2027'} and code not in tickers:
+                    tickers.append(code)
     except Exception as e:
-        print(f"❌ Erreur lors du scraping : {e}")
-        return []
+        print(f"Échec Minkabu : {e}")
 
-# 2. Filtrer selon tes critères stricts
+    # Fallback via Yahoo Finance JP si Minkabu est vide
+    if not tickers:
+        try:
+            print("Tentative de secours via Yahoo Finance JP...")
+            res = requests.get(url_yahoo_jp, headers=headers, timeout=15)
+            if res.status_code == 200 and "Human Verification" not in res.text:
+                found = re.findall(r'/quote/(\d{4})', res.text) or re.findall(r'\b([1-9]\d{3})\b', res.text)
+                for code in found:
+                    if code not in {'2024', '2025', '2026', '2027'} and code not in tickers:
+                        tickers.append(code)
+        except Exception as e:
+            print(f"Échec Yahoo Finance JP : {e}")
+
+    print(f"✅ {len(tickers)} tickers bruts extraits du PTS.")
+    return tickers[:30]
+
+# 2. Filtrer selon tes critères stricts (Yahoo Finance)
 def filter_tickers(tickers):
     print("\nÉtape 2: Application de tes filtres (Prix, Mkt Cap, Volume)...")
     valid_stocks = []
@@ -79,7 +77,7 @@ def filter_tickers(tickers):
         except Exception:
             continue
             
-    print(f"📊 {len(valid_stocks)} / {len(tickers)} actions passent tes critères.")
+    print(f"📊 {len(valid_stocks)} / {len(tickers)} actions correspondent à tes critères.")
     return valid_stocks
 
 # 3. Analyser le catalyseur avec Gemini API
@@ -115,7 +113,7 @@ def analyze_catalyst(valid_stocks):
                 model='gemini-2.5-flash',
                 contents=prompt
             )
-            print(f"\n🚀 ACTION SELECTIONNÉE : {code} ({stock['price']} ¥)")
+            print(f"\n🚀 ACTION SÉLECTIONNÉE : {code} ({stock['price']} ¥)")
             print(f"Mkt Cap: {stock['mkt_cap']/1_000_000_000:.2f} B¥ | Vol 10j: {stock['avg_vol']}")
             print(response.text.strip())
         except Exception as e:
@@ -132,6 +130,6 @@ if __name__ == "__main__":
         if filtered:
             analyze_catalyst(filtered)
         else:
-            print("ℹ️ Résultat vide légitime : des tickers ont été trouvés sur le PTS, mais aucun ne correspond à tes filtres (prix/capitalisation/volume).")
+            print("ℹ️ Aucun ticker ne respecte tes filtres de prix / capitalisation / volume aujourd'hui.")
     else:
-        print("⚠️ Problème à l'étape 1 : Aucun ticker n'a été extrait du HTML de Kabutan.")
+        print("⚠️ Problème à l'étape 1 : Impossible de récupérer le classement PTS.")
