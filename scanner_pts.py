@@ -7,16 +7,14 @@ from google import genai
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# 1. Scraper les Tickers PTS depuis Minkabu / Yahoo JP (sources de secours anti-blocage)
+# 1. Scraper les Tickers PTS depuis Minkabu
 def get_pts_tickers():
     print("Étape 1: Récupération des Top Gainers PTS...")
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     
-    # Source 1: Minkabu PTS Gainers (Très fiable)
     url_minkabu = "https://r.jina.ai/https://minkabu.jp/ranking/pts/gainers"
-    # Source 2: Yahoo Finance JP PTS Ranking
     url_yahoo_jp = "https://r.jina.ai/https://finance.yahoo.co.jp/data/ranking/pts-price-increase"
 
     tickers = []
@@ -33,7 +31,7 @@ def get_pts_tickers():
     except Exception as e:
         print(f"Échec Minkabu : {e}")
 
-    # Fallback via Yahoo Finance JP si Minkabu est vide
+    # Fallback via Yahoo Finance JP
     if not tickers:
         try:
             print("Tentative de secours via Yahoo Finance JP...")
@@ -63,7 +61,7 @@ def filter_tickers(tickers):
             mkt_cap = info.get('marketCap', 0)
             avg_vol = info.get('averageVolume10days', 0)
             
-            # Filtres stricts : Prix 150-2300 JPY, Market Cap <= 100B JPY, Vol 10j >= 100k
+            # Filtres : Prix 150-2300 JPY | Mkt Cap <= 100B JPY | Vol 10j >= 100k
             if (150 <= price <= 2300) and \
                (mkt_cap <= 100_000_000_000) and \
                (avg_vol >= 100_000):
@@ -110,7 +108,7 @@ def analyze_catalyst(valid_stocks):
         
         try:
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.8-flash',
                 contents=prompt
             )
             print(f"\n🚀 ACTION SÉLECTIONNÉE : {code} ({stock['price']} ¥)")
