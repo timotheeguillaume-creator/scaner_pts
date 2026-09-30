@@ -8,20 +8,16 @@ from google import genai
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
+HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+
 # 1. Scraper les Tickers PTS depuis Minkabu
 def get_pts_tickers():
     print("Étape 1: Récupération des Top Gainers PTS...")
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
-    
     url_minkabu = "https://r.jina.ai/https://minkabu.jp/ranking/pts/gainers"
-    url_yahoo_jp = "https://r.jina.ai/https://finance.yahoo.co.jp/data/ranking/pts-price-increase"
-
     tickers = []
     
     try:
-        res = requests.get(url_minkabu, headers=headers, timeout=15)
+        res = requests.get(url_minkabu, headers=HEADERS, timeout=15)
         if res.status_code == 200 and "Human Verification" not in res.text:
             print("✅ Données récupérées depuis Minkabu PTS.")
             found = re.findall(r'/stock/(\d{4})', res.text) or re.findall(r'\b([1-9]\d{3})\b', res.text)
@@ -31,22 +27,10 @@ def get_pts_tickers():
     except Exception as e:
         print(f"Échec Minkabu : {e}")
 
-    if not tickers:
-        try:
-            print("Tentative de secours via Yahoo Finance JP...")
-            res = requests.get(url_yahoo_jp, headers=headers, timeout=15)
-            if res.status_code == 200 and "Human Verification" not in res.text:
-                found = re.findall(r'/quote/(\d{4})', res.text) or re.findall(r'\b([1-9]\d{3})\b', res.text)
-                for code in found:
-                    if code not in {'2024', '2025', '2026', '2027'} and code not in tickers:
-                        tickers.append(code)
-        except Exception as e:
-            print(f"Échec Yahoo Finance JP : {e}")
-
     print(f"✅ {len(tickers)} tickers bruts extraits du PTS.")
     return tickers[:30]
 
-# 2. Filtrer selon tes critères stricts (Yahoo Finance)
+# 2. Filtrer selon tes critères stricts (Prix, Mkt Cap, Volume)
 def filter_tickers(tickers):
     print("\nÉtape 2: Application de tes filtres (Prix, Mkt Cap, Volume)...")
     valid_stocks = []
@@ -77,35 +61,47 @@ def filter_tickers(tickers):
     print(f"📊 {len(valid_stocks)} / {len(tickers)} actions correspondent à tes critères.")
     return valid_stocks
 
-# 3. Analyser le catalyseur avec Gemini API (avec retry et pause rate-limit)
+# Récupérer les vraies actualités en japonais depuis Yahoo Finance JP
+def fetch_jp_news(code):
+    try:
+        url = f"https://r.jina.ai/https://finance.yahoo.co.jp/quote/{code}.T/news"
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        if res.status_code == 200:
+            # Extraire les premières lignes contenant du texte de news
+            lines = [line.strip() for line in res.text.split('\n') if len(line.strip()) > 15]
+            # Conserver les 10 premières lignes significatives
+            clean_text = " | ".join(lines[:10])
+            return clean_text[:1000]
+    except Exception:
+        pass
+    return "Pas d'actualité récente disponible sur Yahoo JP."
+
+# 3. Analyser le catalyseur avec Gemini API
 def analyze_catalyst(valid_stocks):
-    print("\nÉtape 3: Analyse IA des catalyseurs...")
+    print("\nÉtape 3: Analyse IA des catalyseurs (News JP en direct)...")
     if not client:
         print("Erreur: Clé API Gemini non disponible.")
         return
 
     for stock in valid_stocks:
         code = stock['code']
-        ticker_yf = yf.Ticker(f"{code}.T")
-        
-        try:
-            news_list = ticker_yf.news
-        except Exception:
-            news_list = []
-        
-        news_text = " | ".join([n.get('title', '') for n in news_list[:3]]) if news_list else "Pas de news récente."
+        news_jp = fetch_jp_news(code)
         
         prompt = f"""
-        Tu es un analyste financier expert du marché japonais.
-        Voici les dernières actualités pour le titre {code} (Tokyo) : "{news_text}".
-        1. Identifie la raison de la hausse (résultats, rachat, contrat, etc.).
-        2. Donne-lui un score d'impact de 1 à 10.
-        3. Fais un résumé d'une seule phrase en français.
-        Réponds uniquement sous le format :
-        Catalyseur: [Type] | Score: [X]/10 | Résumé: [Ta phrase]
+        Tu es un analyste financier expert du marché japonais (Tokyo Stock Exchange).
+        Voici le contenu récent extrait des actualités/annonces pour l'action {code} :
+        "{news_jp}"
+
+        Tâche :
+        1. Analyse le contenu pour détecter une vraie annonce d'entreprise (Résultats financiers, Révision à la hausse, Rachat d'actions, Partenariat/M&A, Nouveau produit, etc.).
+        2. Si aucune annonce claire n'est visible, indique si le mouvement semble être une pure spéculation technique / momentum PTS.
+        3. Assigne un score d'impact réel de 1 à 10 pour un trade Short-Term intraday.
+        4. Fais un résumé synthétique d'une phrase en français.
+
+        Réponds STRICTEMENT sous ce format :
+        Catalyseur: [Type exact d'annonce ou Spéculation PTS] | Score: [X]/10 | Résumé: [Explication synthétique]
         """
         
-        # Gestion des essais et de la limite de 5 req/min
         for attempt in range(3):
             try:
                 response = client.models.generate_content(
@@ -115,19 +111,19 @@ def analyze_catalyst(valid_stocks):
                 print(f"\n🚀 ACTION SÉLECTIONNÉE : {code} ({stock['price']} ¥)")
                 print(f"Mkt Cap: {stock['mkt_cap']/1_000_000_000:.2f} B¥ | Vol 10j: {stock['avg_vol']}")
                 print(response.text.strip())
-                time.sleep(12)  # Pause de 12s pour ne pas dépasser les 5 requêtes/min
+                time.sleep(14)  # Pause de 14s (évite 100% du 429 quota)
                 break
             except Exception as e:
                 if "429" in str(e) or "503" in str(e):
-                    print(f"[{code}] Quota ou charge élevée (tentative {attempt+1}/3), pause de 15s...")
+                    print(f"[{code}] Quota/charge élevée, nouvelle tentative dans 15s...")
                     time.sleep(15)
                 else:
-                    print(f"[{code}] - Erreur Gemini : {e}")
+                    print(f"[{code}] Erreur Gemini : {e}")
                     break
 
 if __name__ == "__main__":
     if not GEMINI_API_KEY:
-        print("Erreur: Clé API Gemini manquante dans GitHub Secrets.")
+        print("Erreur: Clé API Gemini manquante.")
         exit(1)
         
     tickers = get_pts_tickers()
