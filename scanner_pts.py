@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import requests
 import yfinance as yf
@@ -17,7 +18,7 @@ def get_pts_tickers():
     tickers = []
     
     try:
-        res = requests.get(url_minkabu, headers=HEADERS, timeout=20)
+        res = requests.get(url_minkabu, headers=HEADERS, timeout=15)
         if res.status_code == 200:
             print("✅ Données récupérées depuis Minkabu PTS.")
             found = re.findall(r'/stock/(\d{4})', res.text) or re.findall(r'\b([1-9]\d{3})\b', res.text)
@@ -25,14 +26,14 @@ def get_pts_tickers():
                 if code not in {'2024', '2025', '2026', '2027'} and code not in tickers:
                     tickers.append(code)
     except Exception as e:
-        print(f"Échec Minkabu : {e}")
+        print(f"❌ Échec Minkabu : {e}")
 
     print(f"✅ {len(tickers)} tickers bruts extraits du PTS.")
     return tickers[:30]
 
 # 2. Filtrer selon tes critères stricts (Prix, Mkt Cap, Volume)
 def filter_tickers(tickers):
-    print("\nÉtape 2: Application de tes filtres (Prix, Mkt Cap, Volume)...")
+    print("\nÉtape 2: Application des filtres (Prix, Mkt Cap, Volume)...")
     valid_stocks = []
     
     for code in tickers:
@@ -45,10 +46,7 @@ def filter_tickers(tickers):
             avg_vol = info.get('averageVolume10days', 0)
             
             # Filtres : Prix 150-2300 JPY | Mkt Cap <= 100B JPY | Vol 10j >= 100k
-            if (150 <= price <= 2300) and \
-               (mkt_cap <= 100_000_000_000) and \
-               (avg_vol >= 100_000):
-                
+            if (150 <= price <= 2300) and (mkt_cap <= 100_000_000_000) and (avg_vol >= 100_000):
                 valid_stocks.append({
                     'code': code,
                     'price': price,
@@ -61,68 +59,105 @@ def filter_tickers(tickers):
     print(f"📊 {len(valid_stocks)} / {len(tickers)} actions correspondent à tes critères.")
     return valid_stocks
 
-# Récupérer les vraies actualités en japonais depuis Minkabu News
+# Récupérer les actualités en japonais depuis Minkabu News
 def fetch_jp_news(code):
     try:
         url = f"https://r.jina.ai/https://minkabu.jp/stock/{code}/news"
-        res = requests.get(url, headers=HEADERS, timeout=15)
+        res = requests.get(url, headers=HEADERS, timeout=10)
         if res.status_code == 200:
-            # Filtrer les lignes vides ou trop courtes (souvent le menu de navigation)
-            lines = [line.strip() for line in res.text.split('\n') if len(line.strip()) > 20]
-            # On ignore les 5 premières lignes et on garde les 15 suivantes (cœur de l'article)
-            clean_text = " | ".join(lines[5:20])
-            return clean_text[:1500]
+            lines = [line.strip() for line in res.text.split('\n') if len(line.strip()) > 15]
+            # Extraire le cœur de la page news
+            clean_text = " | ".join(lines[3:25])
+            return clean_text[:1500] if clean_text else "Pas d'actualité texte disponible."
     except Exception:
         pass
     return "Pas d'actualité récente disponible."
 
-# 3. Analyser le catalyseur avec Gemini API
-def analyze_catalyst(valid_stocks):
-    print("\nÉtape 3: Analyse IA des catalyseurs (News Minkabu en direct)...")
+# 3. Analyse BATCH globale avec Gemini (1 seul appel API)
+def analyze_all_catalysts(valid_stocks):
+    print("\nÉtape 3: Collecte des news JP et Analyse IA Globale (1 seul appel Gemini)...")
     if not client:
         print("Erreur: Clé API Gemini non disponible.")
         return
 
+    # Préparation du tableau de données à envoyer à Gemini
+    payload = []
     for stock in valid_stocks:
         code = stock['code']
         news_jp = fetch_jp_news(code)
-        
-        prompt = f"""
-        Tu es un analyste financier expert du marché japonais (Tokyo Stock Exchange).
-        Voici le contenu récent extrait des actualités pour l'action {code} :
-        "{news_jp}"
+        payload.append({
+            "code": code,
+            "price": stock['price'],
+            "mkt_cap_B_JPY": round(stock['mkt_cap'] / 1_000_000_000, 2),
+            "avg_vol_10d": stock['avg_vol'],
+            "news_text": news_jp
+        })
 
-        Tâche :
-        1. Analyse le contenu pour détecter une vraie annonce d'entreprise (Résultats financiers, Révision, Rachat d'actions, Partenariat, Nouveau produit).
-        2. Si aucune annonce claire n'est visible, indique si le mouvement est spéculatif.
-        3. Assigne un score d'impact réel de 1 à 10 pour un trade intraday.
-        4. Fais un résumé synthétique d'une phrase en français.
+    prompt = f"""
+    Tu es un analyste financier expert du marché japonais (Tokyo Stock Exchange / PTS).
+    Voici la liste des actions ayant fort volume/hausse en PTS avec leurs actualités/communiqués récents :
 
-        Réponds STRICTEMENT sous ce format :
-        Catalyseur: [Type] | Score: [X]/10 | Résumé: [Phrase synthétique]
-        """
-        
-        # 4 tentatives avec un long temps d'arrêt pour éviter les 429 Resource Exhausted
-        for attempt in range(4):
-            try:
-                response = client.models.generate_content(
-                    model='gemini-3.8-flash',
-                    contents=prompt
-                )
-                print(f"\n🚀 ACTION SÉLECTIONNÉE : {code} ({stock['price']} ¥)")
-                print(f"Mkt Cap: {stock['mkt_cap']/1_000_000_000:.2f} B¥ | Vol 10j: {stock['avg_vol']}")
-                print(response.text.strip())
+    {json.dumps(payload, ensure_ascii=False, indent=2)}
+
+    TÂCHE :
+    Pour CHAQUE action présente dans la liste ci-dessus :
+    1. Analyse le texte 'news_text' pour détecter une vraie annonce d'entreprise (Résultats financiers, Révision à la hausse, Rachat d'actions, Partenariat, M&A, TDNet release).
+    2. Si le texte ne contient aucune annonce fondamentale claire, évalue si le mouvement est d'ordre spéculatif/technique.
+    3. Assigne un score d'impact court terme de 1 à 10 pour un trade intraday.
+    4. Rédige un résumé synthétique d'une phrase en français.
+
+    FORMAT DE RÉPONSE OBLIGATOIRE :
+    Tu dois répondre STRICTEMENT sous la forme d'un objet JSON valide sans aucun texte additionnel avant ou après.
+    Format JSON attendu :
+    {{
+      "CODE_TICKER": {{
+        "catalyseur": "Type de catalyseur exact ou Spéculation PTS",
+        "score": 8,
+        "resume": "Résumé d'une phrase en français."
+      }}
+    }}
+    """
+
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model='gemini-3.8-flash',
+                contents=prompt
+            )
+            
+            # Extraction propre du JSON de la réponse Gemini
+            raw_res = response.text.strip()
+            json_match = re.search(r'\{.*\}', raw_res, re.DOTALL)
+            
+            if json_match:
+                results = json.loads(json_match.group(0))
                 
-                # PAUSE DE SÉCURITÉ ABSOLUE : 25 SECONDES
-                time.sleep(25) 
+                print("\n" + "="*50)
+                print("⚡ RÉSULTATS DU SCANNER PTS")
+                print("="*50)
+                
+                for stock in valid_stocks:
+                    code = stock['code']
+                    res = results.get(code, {})
+                    cat = res.get('catalyseur', 'Non évalué')
+                    score = res.get('score', 1)
+                    resume = res.get('resume', 'Aucune analyse disponible.')
+                    
+                    print(f"\n🚀 ACTION SÉLECTIONNÉE : {code} ({stock['price']} ¥)")
+                    print(f"Mkt Cap: {stock['mkt_cap']/1_000_000_000:.2f} B¥ | Vol 10j: {stock['avg_vol']}")
+                    print(f"Catalyseur: {cat} | Score: {score}/10 | Résumé: {resume}")
                 break
-            except Exception as e:
-                if "429" in str(e) or "503" in str(e) or "quota" in str(e).lower():
-                    print(f"[{code}] Quota ou charge serveur (Essai {attempt+1}/4), pause de 30s...")
-                    time.sleep(30)
-                else:
-                    print(f"[{code}] Erreur API Gemini : {e}")
-                    break
+            else:
+                print("⚠️ Erreur de formatage JSON dans la réponse Gemini.")
+                break
+
+        except Exception as e:
+            if "429" in str(e) or "503" in str(e) or "quota" in str(e).lower():
+                print(f"⚠️ Surcharge API Gemini, réessai dans 10s... (Essai {attempt+1}/3)")
+                time.sleep(10)
+            else:
+                print(f"❌ Erreur API Gemini : {e}")
+                break
 
 if __name__ == "__main__":
     if not GEMINI_API_KEY:
@@ -133,7 +168,7 @@ if __name__ == "__main__":
     if tickers:
         filtered = filter_tickers(tickers)
         if filtered:
-            analyze_catalyst(filtered)
+            analyze_all_catalysts(filtered)
         else:
             print("ℹ️ Aucun ticker ne respecte tes filtres de prix / capitalisation / volume aujourd'hui.")
     else:
