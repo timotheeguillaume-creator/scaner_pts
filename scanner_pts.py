@@ -1,66 +1,49 @@
 import os
 import re
 import requests
-from bs4 import BeautifulSoup
 import yfinance as yf
 from google import genai
 
-# Configuration de l'API Gemini avec le nouveau SDK officiel google-genai
+# Configuration de l'API Gemini avec le SDK officiel google-genai
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# 1. Scraper les Tickers du PTS Kabutan via le proxy Google (contournement du géo-blocage)
+# 1. Scraper les Tickers du PTS Kabutan via Jina AI Reader (bypass WAF/Geoblock)
 def get_pts_tickers():
     print("Étape 1: Récupération des Top Gainers PTS...")
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     
-    # URL passant par le proxy Google Translate pour contourner le géo-blocage de Kabutan
-    url_proxy = "https://kabutan-jp.translate.goog/pts/?_x_tr_sl=ja&_x_tr_tl=en"
-    url_direct = "https://kabutan.jp/pts/"
+    # Passing Kabutan URL through Jina AI Reader
+    url_jina = "https://r.jina.ai/https://kabutan.jp/pts/"
     
-    response = None
     try:
-        # Essai via le proxy Google
-        response = requests.get(url_proxy, headers=headers, timeout=15)
-        print(f"Statut HTTP (Proxy Google) : {response.status_code}")
+        response = requests.get(url_jina, headers=headers, timeout=20)
+        print(f"Statut HTTP (via Jina Reader) : {response.status_code}")
         
-        # Secours via l'URL directe si le proxy échoue
         if response.status_code != 200:
-            print("Tentative via accès direct...")
-            response = requests.get(url_direct, headers=headers, timeout=15)
-            print(f"Statut HTTP (Direct) : {response.status_code}")
+            print("Erreur d'accès à la page des données PTS.")
+            return []
+
+        raw_text = response.text
+        
+        # Extraction des codes tickers japonais à 4 chiffres (de 1000 à 9999)
+        matches = re.findall(r'\b([1-9]\d{3})\b', raw_text)
+        
+        tickers = []
+        # Exclure les années courantes et doublons
+        excluded_numbers = {'2024', '2025', '2026', '2027'}
+        for code in matches:
+            if code not in excluded_numbers and code not in tickers:
+                tickers.append(code)
+
+        print(f"{len(tickers)} tickers extraits du PTS.")
+        return tickers[:30]
 
     except Exception as e:
         print(f"Erreur de connexion : {e}")
         return []
-
-    if not response or response.status_code != 200:
-        print("Erreur d'accès à la page des données PTS.")
-        return []
-
-    soup = BeautifulSoup(response.text, 'html.parser')
-    tickers = []
-    
-    # Recherche des codes tickers à 4 chiffres dans les liens
-    for a in soup.find_all('a', href=True):
-        href = a['href']
-        match = re.search(r'code=(\d{4})', href) or re.search(r'/stock/.*code=(\d{4})', href)
-        if match:
-            code = match.group(1)
-            if code not in tickers:
-                tickers.append(code)
-
-    # Fallback par Regex sur tout le corps du texte HTML
-    if not tickers:
-        matches = re.findall(r'code=(\d{4})', response.text)
-        for code in matches:
-            if code not in tickers:
-                tickers.append(code)
-
-    print(f"{len(tickers)} tickers trouvés sur le PTS.")
-    return tickers[:30]
 
 # 2. Filtrer selon tes critères stricts (Yahoo Finance)
 def filter_tickers(tickers):
@@ -76,8 +59,7 @@ def filter_tickers(tickers):
             mkt_cap = info.get('marketCap', 0)
             avg_vol = info.get('averageVolume10days', 0)
             
-            # Application de tes filtres stricts :
-            # Prix : 150 à 2300 JPY | Market Cap <= 100 Billion JPY | Vol 10j >= 100k
+            # Filtres : Prix 150-2300 JPY, Market Cap <= 100B JPY, Vol 10j >= 100k
             if (150 <= price <= 2300) and \
                (mkt_cap <= 100_000_000_000) and \
                (avg_vol >= 100_000):
