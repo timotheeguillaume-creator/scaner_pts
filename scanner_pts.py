@@ -8,14 +8,13 @@ from google import genai
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# 1. Scraper les Tickers du PTS Kabutan via Jina AI Reader (bypass WAF/Geoblock)
+# 1. Scraper les Tickers du PTS Kabutan via Jina AI Reader
 def get_pts_tickers():
     print("Étape 1: Récupération des Top Gainers PTS...")
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     
-    # Passing Kabutan URL through Jina AI Reader
     url_jina = "https://r.jina.ai/https://kabutan.jp/pts/"
     
     try:
@@ -28,13 +27,16 @@ def get_pts_tickers():
 
         raw_text = response.text
         
-        # Extraction des codes tickers japonais à 4 chiffres (de 1000 à 9999)
-        matches = re.findall(r'\b([1-9]\d{3})\b', raw_text)
+        # Extraction ciblée des codes tickers à 4 chiffres dans les liens Markdown
+        found_codes = re.findall(r'code=(\d{4})', raw_text) + re.findall(r'/stock/\?code=(\d{4})', raw_text)
         
+        # Fallback par Regex élargie si aucun paramètre URL n'est trouvé
+        if not found_codes:
+            found_codes = re.findall(r'\b([1-9]\d{3})\b', raw_text)
+
         tickers = []
-        # Exclure les années courantes et doublons
         excluded_numbers = {'2024', '2025', '2026', '2027'}
-        for code in matches:
+        for code in found_codes:
             if code not in excluded_numbers and code not in tickers:
                 tickers.append(code)
 
